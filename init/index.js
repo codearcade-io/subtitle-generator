@@ -113,9 +113,6 @@ const init = async () => {
         );
       }
 
-      // https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-Win32.zip
-      // https://github.com/ggml-org/whisper.cpp/releases/v1.8.4/download/whisper-bin-Win32.zip
-
       const zipUrl = `https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/${zipName}`;
       const zipPath = path.join(whisperDir, "whisper.zip");
 
@@ -123,48 +120,69 @@ const init = async () => {
 
       console.log("Extracting binary...");
 
-      try {
-        // Use PowerShell instead of tar to avoid the Windows bsdtar decompression bug
-        execSync(
-          `powershell -command "Expand-Archive -Force -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}'"`,
-          { stdio: "inherit" },
-        );
+      let extractionSuccess = false;
+      let maxRetries = 5;
+      let retryDelay = 1000; // 1 second
 
-        // 1. Move everything out of the "Release" folder
-        const possibleReleaseDir = path.join(whisperDir, "Release");
-
-        if (fs.existsSync(possibleReleaseDir)) {
-          const files = fs.readdirSync(possibleReleaseDir);
-
-          for (const file of files) {
-            fs.renameSync(
-              path.join(possibleReleaseDir, file),
-              path.join(whisperDir, file),
+      // 1. The Retry Loop for safe extraction
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          execSync(
+            `powershell -command "Expand-Archive -Force -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}'"`,
+            { stdio: "inherit" },
+          );
+          extractionSuccess = true;
+          break; // It worked! Break out of the loop.
+        } catch (error) {
+          if (attempt === maxRetries) {
+            console.error(
+              `\nExtraction failed after ${maxRetries} attempts. File might be permanently locked or corrupted.`,
             );
+            throw error;
           }
-          // Delete the now-empty Release folder
-          fs.rmdirSync(possibleReleaseDir);
+          console.log(
+            `\nFile locked by Windows (likely Antivirus). Retrying in 1 second... (Attempt ${attempt} of ${maxRetries})`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
         }
+      }
 
-        // 2. Rename extracted main.exe to match our wrapper expectations
-        const extractedMain = path.join(whisperDir, "main.exe");
-        if (fs.existsSync(extractedMain)) {
-          fs.renameSync(extractedMain, binaryDest);
-        } else {
-          console.error("Warning: Could not find main.exe after extraction.");
+      // 2. The Cleanup Phase (Only runs if extraction worked)
+      if (extractionSuccess) {
+        try {
+          // Move everything out of the "Release" folder
+          const possibleReleaseDir = path.join(whisperDir, "Release");
+
+          if (fs.existsSync(possibleReleaseDir)) {
+            const files = fs.readdirSync(possibleReleaseDir);
+
+            for (const file of files) {
+              fs.renameSync(
+                path.join(possibleReleaseDir, file),
+                path.join(whisperDir, file),
+              );
+            }
+            // Delete the now-empty Release folder
+            fs.rmdirSync(possibleReleaseDir);
+          }
+
+          // Rename extracted main.exe to match our wrapper expectations
+          const extractedMain = path.join(whisperDir, "main.exe");
+          if (fs.existsSync(extractedMain)) {
+            fs.renameSync(extractedMain, binaryDest);
+          } else {
+            console.error("Warning: Could not find main.exe after extraction.");
+          }
+
+          // Clean up the zip file
+          if (fs.existsSync(zipPath)) {
+            fs.unlinkSync(zipPath);
+          }
+
+          console.log(`Whisper binary setup complete for Windows (${arch}).`);
+        } catch (error) {
+          console.error("Error during binary cleanup/renaming:", error.message);
         }
-
-        // 3. Clean up the zip file
-        if (fs.existsSync(zipPath)) {
-          fs.unlinkSync(zipPath);
-        }
-
-        console.log(`Whisper binary setup complete for Windows (${arch}).`);
-      } catch (error) {
-        console.error(
-          "Extraction failed. Please ensure PowerShell is available.",
-          error.message,
-        );
       }
     } else {
       console.log("Whisper binary already exists for Windows.");
