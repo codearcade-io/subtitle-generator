@@ -1,0 +1,60 @@
+{
+  "name": "@codearcade/subtitle-generator",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun ./builder.ts && bun run generate-types",
+    "prepublishOnly": "bun run build",
+    "generate-types": "bunx tsc --emitDeclarationOnly --declaration --outDir dist",
+    "clear": "rm -rf dist"
+  },
+  "bin": {
+    "subtitle-generator": "./cli/index.js"
+  },
+  "files": [
+    "dist",
+    "cli",
+    "init"
+  ],
+  "homepage": "https://github.com/codearcade-io/subtitle-generator.git#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codearcade-io/subtitle-generator.git"
+  },
+  "bugs": "https://github.com/codearcade-io/subtitle-generator/issues",
+  "author": "Abhishek Singh <official.6packprogrammer@gmail.com>",
+  "license": "MIT",
+  "description": "Generate subtitles from audio files using OpenAI Whisper with support for SRT, VTT, and TXT formats. Automatically downloads required binaries and models, with cross-platform support and configurable performance options.",
+  "keywords": [
+    "whisper",
+    "subtitle",
+    "subtitles",
+    "speech-to-text",
+    "transcription",
+    "audio",
+    "srt",
+    "vtt",
+    "nodejs",
+    "npm",
+    "openai",
+    "ai",
+    "speech-recognition",
+    "cli",
+    "cross-platform"
+  ],
+  "devDependencies": {
+    "@types/bun": "^1.3.11"
+  },
+  "dependencies": {
+    "inquirer": "^13.3.2"
+  }
+}

@@ -1,0 +1,179 @@
+import inquirer from "inquirer";
+import path from "path";
+import fs from "fs";
+import os from "os";
+import { execSync } from "child_process";
+
+const init = async () => {
+  const { modelSize } = await inquirer.prompt([
+    {
+      type: "list",
+      name: "modelSize",
+      message: "Which Whisper model do you want to download?",
+      choices: [
+        { name: "Small  — fast, lower accuracy", value: "small" },
+        { name: "Medium — balanced", value: "medium" },
+        { name: "Large  — slow, highest accuracy", value: "large" },
+      ],
+      default: "small",
+    },
+  ]);
+
+  const modelUrls = {
+    small:
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+    medium:
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+    large:
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+  };
+
+  const modelUrl = modelUrls[modelSize];
+
+  // Helper function to download both models and zip files
+  async function downloadFile(url, dest, label) {
+    if (fs.existsSync(dest)) {
+      console.log(`${label} already exists at ${dest}`);
+      return;
+    }
+
+    console.log(`Downloading ${label}...`);
+    const res = await fetch(url);
+
+    if (!res.ok) throw new Error(`Failed to download: ${res.statusText}`);
+
+    const total = Number(res.headers.get("content-length")) || 0;
+    let downloaded = 0;
+
+    const file = fs.createWriteStream(dest);
+
+    await res.body.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          downloaded += chunk.length;
+          if (total) {
+            const percent = ((downloaded / total) * 100).toFixed(2);
+            process.stdout.write(`Downloading ${label}... ${percent}%\r`);
+          } else {
+            process.stdout.write(`Downloaded ${downloaded} bytes\r`);
+          }
+          file.write(chunk);
+        },
+        close() {
+          file.end();
+          console.log(`\n${label} download complete.`);
+        },
+        abort(err) {
+          file.destroy(err);
+        },
+      }),
+    );
+  }
+
+  // 1. Download the AI Model
+  const modelsDir = path.join(process.cwd(), "models");
+  if (!fs.existsSync(modelsDir)) {
+    fs.mkdirSync(modelsDir, { recursive: true });
+  }
+  const destModelPath = path.join(modelsDir, path.basename(modelUrl));
+  await downloadFile(modelUrl, destModelPath, `${modelSize} model`);
+
+  // 2. Setup the Binary based on OS
+  console.log("\nSetting up whisper.cpp binary...");
+  const platform = os.platform();
+  const whisperDir = path.join(process.cwd(), "whisper");
+  const isWindows = platform === "win32";
+
+  if (!fs.existsSync(whisperDir)) {
+    fs.mkdirSync(whisperDir, { recursive: true });
+  }
+
+  if (isWindows) {
+    // Windows Setup
+    const binaryDest = path.join(whisperDir, "whisper-cli.exe");
+    if (!fs.existsSync(binaryDest)) {
+      // Using latest pre-built x64 binaries from ggml-org
+      const zipUrl =
+        "https://github.com/ggerganov/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+      const zipPath = path.join(whisperDir, "whisper.zip");
+
+      await downloadFile(zipUrl, zipPath, "Whisper Windows Binary");
+
+      console.log("Extracting binary...");
+      // Windows 10+ has native tar for unzipping
+      execSync(`tar -xf "${zipPath}" -C "${whisperDir}"`);
+
+      // 1. Move everything out of the "Release" folder (or any other subfolder the zip might use)
+      const possibleReleaseDir = path.join(whisperDir, "Release");
+
+      if (fs.existsSync(possibleReleaseDir)) {
+        // Read all files inside the Release folder
+        const files = fs.readdirSync(possibleReleaseDir);
+
+        // Move them up one level into the main whisperDir
+        for (const file of files) {
+          fs.renameSync(
+            path.join(possibleReleaseDir, file),
+            path.join(whisperDir, file),
+          );
+        }
+        // Delete the now-empty Release folder
+        fs.rmdirSync(possibleReleaseDir);
+      }
+
+      // 2. Rename extracted main.exe to match our wrapper expectations
+      const extractedMain = path.join(whisperDir, "main.exe");
+      if (fs.existsSync(extractedMain)) {
+        fs.renameSync(extractedMain, binaryDest);
+      } else {
+        console.error("Warning: Could not find main.exe after extraction.");
+      }
+
+      // 3. Clean up the zip file so it doesn't clutter the folder
+      if (fs.existsSync(zipPath)) {
+        fs.unlinkSync(zipPath);
+      }
+
+      console.log("Whisper binary setup complete for Windows.");
+    } else {
+      console.log("Whisper binary already exists for Windows.");
+    }
+  } else {
+    // Mac / Linux Setup
+    const binaryDest = path.join(whisperDir, "whisper");
+    if (!fs.existsSync(binaryDest)) {
+      console.log("Mac/Linux detected. Building whisper.cpp from source...");
+      console.log(
+        "Note: This requires 'git', 'make', and a C/C++ compiler (gcc/clang).",
+      );
+
+      const repoDir = path.join(whisperDir, "source");
+      if (!fs.existsSync(repoDir)) {
+        // Shallow clone to save time and bandwidth
+        execSync(
+          `git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "${repoDir}"`,
+          { stdio: "inherit" },
+        );
+      }
+
+      console.log("Compiling... This might take a minute.");
+      // Compile only the main CLI tool
+      execSync(`cd "${repoDir}" && make main`, { stdio: "inherit" });
+
+      const compiledPath = path.join(repoDir, "main");
+      if (fs.existsSync(compiledPath)) {
+        fs.copyFileSync(compiledPath, binaryDest);
+        execSync(`chmod +x "${binaryDest}"`);
+        console.log("Whisper binary compiled and configured successfully.");
+      } else {
+        console.error(
+          "Error: Could not find the compiled binary. Compilation might have failed.",
+        );
+      }
+    } else {
+      console.log("Whisper binary already exists.");
+    }
+  }
+};
+
+export default init;
