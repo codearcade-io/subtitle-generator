@@ -92,49 +92,80 @@ const init = async () => {
     // Windows Setup
     const binaryDest = path.join(whisperDir, "whisper-cli.exe");
     if (!fs.existsSync(binaryDest)) {
-      // Using latest pre-built x64 binaries from ggml-org
-      const zipUrl =
-        "https://github.com/ggerganov/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+      console.log("Detecting Windows architecture...");
+      const arch = os.arch(); // Usually 'x64', 'ia32', or 'arm64'
+
+      let zipName;
+
+      if (arch === "x64") {
+        zipName = "whisper-bin-x64.zip";
+      } else if (arch === "ia32") {
+        zipName = "whisper-bin-Win32.zip";
+      } else if (arch === "arm64") {
+        // Windows ARM can emulate x64 executables
+        console.log(
+          "ARM64 architecture detected. Using x64 binary via Windows emulation...",
+        );
+        zipName = "whisper-bin-x64.zip";
+      } else {
+        throw new Error(
+          `Unsupported Windows architecture: ${arch}. Whisper.cpp does not provide pre-compiled binaries for this system.`,
+        );
+      }
+
+      // https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-Win32.zip
+      // https://github.com/ggml-org/whisper.cpp/releases/v1.8.4/download/whisper-bin-Win32.zip
+
+      const zipUrl = `https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/${zipName}`;
       const zipPath = path.join(whisperDir, "whisper.zip");
 
-      await downloadFile(zipUrl, zipPath, "Whisper Windows Binary");
+      await downloadFile(zipUrl, zipPath, `Whisper Windows Binary (${arch})`);
 
       console.log("Extracting binary...");
-      // Windows 10+ has native tar for unzipping
-      execSync(`tar -xf "${zipPath}" -C "${whisperDir}"`);
 
-      // 1. Move everything out of the "Release" folder (or any other subfolder the zip might use)
-      const possibleReleaseDir = path.join(whisperDir, "Release");
+      try {
+        // Use PowerShell instead of tar to avoid the Windows bsdtar decompression bug
+        execSync(
+          `powershell -command "Expand-Archive -Force -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}'"`,
+          { stdio: "inherit" },
+        );
 
-      if (fs.existsSync(possibleReleaseDir)) {
-        // Read all files inside the Release folder
-        const files = fs.readdirSync(possibleReleaseDir);
+        // 1. Move everything out of the "Release" folder
+        const possibleReleaseDir = path.join(whisperDir, "Release");
 
-        // Move them up one level into the main whisperDir
-        for (const file of files) {
-          fs.renameSync(
-            path.join(possibleReleaseDir, file),
-            path.join(whisperDir, file),
-          );
+        if (fs.existsSync(possibleReleaseDir)) {
+          const files = fs.readdirSync(possibleReleaseDir);
+
+          for (const file of files) {
+            fs.renameSync(
+              path.join(possibleReleaseDir, file),
+              path.join(whisperDir, file),
+            );
+          }
+          // Delete the now-empty Release folder
+          fs.rmdirSync(possibleReleaseDir);
         }
-        // Delete the now-empty Release folder
-        fs.rmdirSync(possibleReleaseDir);
-      }
 
-      // 2. Rename extracted main.exe to match our wrapper expectations
-      const extractedMain = path.join(whisperDir, "main.exe");
-      if (fs.existsSync(extractedMain)) {
-        fs.renameSync(extractedMain, binaryDest);
-      } else {
-        console.error("Warning: Could not find main.exe after extraction.");
-      }
+        // 2. Rename extracted main.exe to match our wrapper expectations
+        const extractedMain = path.join(whisperDir, "main.exe");
+        if (fs.existsSync(extractedMain)) {
+          fs.renameSync(extractedMain, binaryDest);
+        } else {
+          console.error("Warning: Could not find main.exe after extraction.");
+        }
 
-      // 3. Clean up the zip file so it doesn't clutter the folder
-      if (fs.existsSync(zipPath)) {
-        fs.unlinkSync(zipPath);
-      }
+        // 3. Clean up the zip file
+        if (fs.existsSync(zipPath)) {
+          fs.unlinkSync(zipPath);
+        }
 
-      console.log("Whisper binary setup complete for Windows.");
+        console.log(`Whisper binary setup complete for Windows (${arch}).`);
+      } catch (error) {
+        console.error(
+          "Extraction failed. Please ensure PowerShell is available.",
+          error.message,
+        );
+      }
     } else {
       console.log("Whisper binary already exists for Windows.");
     }
@@ -151,7 +182,7 @@ const init = async () => {
       if (!fs.existsSync(repoDir)) {
         // Shallow clone to save time and bandwidth
         execSync(
-          `git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "${repoDir}"`,
+          `git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git "${repoDir}"`,
           { stdio: "inherit" },
         );
       }
