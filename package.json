@@ -33,6 +33,9 @@
   "bugs": "https://github.com/codearcade-io/subtitle-generator/issues",
   "author": "Abhishek Singh <official.6packprogrammer@gmail.com>",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Generate subtitles from audio files using OpenAI Whisper with support for SRT, VTT, and TXT formats. Automatically downloads required binaries and models, with cross-platform support and configurable performance options.",
   "keywords": [
     "whisper",
