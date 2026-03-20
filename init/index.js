@@ -3,6 +3,9 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { execSync } from "child_process";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import unzipper from "unzipper";
 
 const init = async () => {
   const { modelSize } = await inquirer.prompt([
@@ -38,44 +41,51 @@ const init = async () => {
     }
 
     console.log(`Downloading ${label}...`);
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "node",
+      },
+    });
 
-    if (!res.ok) throw new Error(`Failed to download: ${res.statusText}`);
+    const contentType = res.headers.get("content-type");
+
+    if (!contentType || !contentType.includes("application")) {
+      throw new Error(
+        `Invalid response. Expected binary file but got: ${contentType}`,
+      );
+    }
+
+    if (!res.ok) {
+      throw new Error(`Failed to download: ${res.statusText}`);
+    }
 
     const total = Number(res.headers.get("content-length")) || 0;
     let downloaded = 0;
 
-    const file = fs.createWriteStream(dest);
+    const fileStream = fs.createWriteStream(dest);
 
-    // Wait for both the pipeTo AND the file stream to fully close
-    // so the file handle is released before we try to use the file.
-    await new Promise((resolve, reject) => {
-      file.on("close", resolve);
-      file.on("error", reject);
+    const nodeStream = Readable.fromWeb(res.body);
 
-      res.body.pipeTo(
-        new WritableStream({
-          write(chunk) {
-            downloaded += chunk.length;
-            if (total) {
-              const percent = ((downloaded / total) * 100).toFixed(2);
-              process.stdout.write(`Downloading ${label}... ${percent}%\r`);
-            } else {
-              process.stdout.write(`Downloaded ${downloaded} bytes\r`);
-            }
-            file.write(chunk);
-          },
-          close() {
-            file.end(); // triggers 'close' event on the file stream once flushed
-            console.log(`\n${label} download complete.`);
-          },
-          abort(err) {
-            file.destroy(err);
-            reject(err);
-          },
-        }),
-      ).catch(reject);
+    nodeStream.on("data", (chunk) => {
+      downloaded += chunk.length;
+      if (total) {
+        const percent = ((downloaded / total) * 100).toFixed(2);
+        process.stdout.write(`Downloading ${label}... ${percent}%\r`);
+      }
     });
+
+    await pipeline(nodeStream, fileStream);
+
+    const stats = fs.statSync(dest);
+
+    if (stats.size < 100000) {
+      throw new Error(
+        `Downloaded file too small (${stats.size} bytes). Likely HTML instead of ZIP.`,
+      );
+    }
+
+    console.log(`\n${label} download complete.`);
   }
 
   // 1. Download the AI Model
@@ -97,11 +107,11 @@ const init = async () => {
   }
 
   if (isWindows) {
-    // Windows Setup
     const binaryDest = path.join(whisperDir, "whisper-cli.exe");
+
     if (!fs.existsSync(binaryDest)) {
       console.log("Detecting Windows architecture...");
-      const arch = os.arch(); // Usually 'x64', 'ia32', or 'arm64'
+      const arch = os.arch();
 
       let zipName;
 
@@ -110,15 +120,10 @@ const init = async () => {
       } else if (arch === "ia32") {
         zipName = "whisper-bin-Win32.zip";
       } else if (arch === "arm64") {
-        // Windows ARM can emulate x64 executables
-        console.log(
-          "ARM64 architecture detected. Using x64 binary via Windows emulation...",
-        );
+        console.log("ARM64 detected → using x64 binary via emulation...");
         zipName = "whisper-bin-x64.zip";
       } else {
-        throw new Error(
-          `Unsupported Windows architecture: ${arch}. Whisper.cpp does not provide pre-compiled binaries for this system.`,
-        );
+        throw new Error(`Unsupported architecture: ${arch}`);
       }
 
       const zipUrl = `https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/${zipName}`;
@@ -126,72 +131,53 @@ const init = async () => {
 
       await downloadFile(zipUrl, zipPath, `Whisper Windows Binary (${arch})`);
 
-      console.log("Extracting binary...");
-
-      let extractionSuccess = false;
-      let maxRetries = 5;
-      let retryDelay = 1000; // 1 second
-
-      // 1. The Retry Loop for safe extraction
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          execSync(
-            `powershell -command "Expand-Archive -Force -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}'"`,
-            { stdio: "inherit" },
-          );
-          extractionSuccess = true;
-          break; // It worked! Break out of the loop.
-        } catch (error) {
-          if (attempt === maxRetries) {
-            console.error(
-              `\nExtraction failed after ${maxRetries} attempts. File might be permanently locked or corrupted.`,
-            );
-            throw error;
-          }
-          console.log(
-            `\nFile locked by Windows (likely Antivirus). Retrying in 1 second... (Attempt ${attempt} of ${maxRetries})`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, retryDelay));
-        }
+      // ✅ sanity check
+      const stats = fs.statSync(zipPath);
+      if (stats.size < 1_000_000) {
+        throw new Error(`Downloaded ZIP too small (${stats.size} bytes)`);
       }
 
-      // 2. The Cleanup Phase (Only runs if extraction worked)
-      if (extractionSuccess) {
-        try {
-          // Move everything out of the "Release" folder
-          const possibleReleaseDir = path.join(whisperDir, "Release");
+      console.log("Extracting binary (unzipper)...");
 
-          if (fs.existsSync(possibleReleaseDir)) {
-            const files = fs.readdirSync(possibleReleaseDir);
+      await new Promise((resolve, reject) => {
+        fs.createReadStream(zipPath)
+          .pipe(unzipper.Parse())
+          .on("entry", (entry) => {
+            const filePath = path.join(whisperDir, entry.path);
 
-            for (const file of files) {
-              fs.renameSync(
-                path.join(possibleReleaseDir, file),
-                path.join(whisperDir, file),
-              );
+            if (entry.type === "Directory") {
+              fs.mkdirSync(filePath, { recursive: true });
+              entry.autodrain();
+            } else {
+              fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+              entry.pipe(fs.createWriteStream(filePath));
             }
-            // Delete the now-empty Release folder
-            fs.rmdirSync(possibleReleaseDir);
-          }
+          })
+          .on("close", resolve)
+          .on("error", reject);
+      });
 
-          // Rename extracted main.exe to match our wrapper expectations
-          const extractedMain = path.join(whisperDir, "main.exe");
-          if (fs.existsSync(extractedMain)) {
-            fs.renameSync(extractedMain, binaryDest);
-          } else {
-            console.error("Warning: Could not find main.exe after extraction.");
-          }
+      // 🔍 Handle "Release" folder
+      const releaseDir = path.join(whisperDir, "Release");
 
-          // Clean up the zip file
-          if (fs.existsSync(zipPath)) {
-            fs.unlinkSync(zipPath);
-          }
+      if (fs.existsSync(releaseDir)) {
+        const files = fs.readdirSync(releaseDir);
 
-          console.log(`Whisper binary setup complete for Windows (${arch}).`);
-        } catch (error) {
-          console.error("Error during binary cleanup/renaming:", error.message);
+        for (const file of files) {
+          fs.renameSync(
+            path.join(releaseDir, file),
+            path.join(whisperDir, file),
+          );
         }
+
+        fs.rmSync(releaseDir, { recursive: true, force: true });
       }
+
+      // ✅ cleanup zip
+      fs.unlinkSync(zipPath);
+
+      console.log(`Whisper binary setup complete for Windows (${arch}).`);
     } else {
       console.log("Whisper binary already exists for Windows.");
     }
