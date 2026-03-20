@@ -47,27 +47,35 @@ const init = async () => {
 
     const file = fs.createWriteStream(dest);
 
-    await res.body.pipeTo(
-      new WritableStream({
-        write(chunk) {
-          downloaded += chunk.length;
-          if (total) {
-            const percent = ((downloaded / total) * 100).toFixed(2);
-            process.stdout.write(`Downloading ${label}... ${percent}%\r`);
-          } else {
-            process.stdout.write(`Downloaded ${downloaded} bytes\r`);
-          }
-          file.write(chunk);
-        },
-        close() {
-          file.end();
-          console.log(`\n${label} download complete.`);
-        },
-        abort(err) {
-          file.destroy(err);
-        },
-      }),
-    );
+    // Wait for both the pipeTo AND the file stream to fully close
+    // so the file handle is released before we try to use the file.
+    await new Promise((resolve, reject) => {
+      file.on("close", resolve);
+      file.on("error", reject);
+
+      res.body.pipeTo(
+        new WritableStream({
+          write(chunk) {
+            downloaded += chunk.length;
+            if (total) {
+              const percent = ((downloaded / total) * 100).toFixed(2);
+              process.stdout.write(`Downloading ${label}... ${percent}%\r`);
+            } else {
+              process.stdout.write(`Downloaded ${downloaded} bytes\r`);
+            }
+            file.write(chunk);
+          },
+          close() {
+            file.end(); // triggers 'close' event on the file stream once flushed
+            console.log(`\n${label} download complete.`);
+          },
+          abort(err) {
+            file.destroy(err);
+            reject(err);
+          },
+        }),
+      ).catch(reject);
+    });
   }
 
   // 1. Download the AI Model
